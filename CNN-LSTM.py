@@ -1,14 +1,14 @@
-# 导入库
-from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
-import pandas as pd  # 导入csv文件的库
-import numpy as np  # 进行矩阵运算的库
-import matplotlib.pyplot as plt  # 导入强大的绘图库
-import torch   # 一个深度学习的库Pytorch
-import torch.nn as nn  # neural network,神经网络
-import torch.optim as optim  # 个实现了各种优化算法的库
-from sklearn.preprocessing import MinMaxScaler
 import random
-import csv
+import pandas as pd
+import numpy as np
+from sklearn.preprocessing import MinMaxScaler
+import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader, TensorDataset
+from sklearn.model_selection import KFold
+import matplotlib.pyplot as plt
+import torch.optim as optim
+from sklearn.metrics import mean_squared_error, mean_absolute_error
 import warnings  # 避免一些可以忽略的报错
 warnings.filterwarnings('ignore')  # filterwarnings()方法是用于设置警告过滤器的方法，它可以控制警告信息的输出方式和级别.
 
@@ -17,238 +17,221 @@ torch.manual_seed(42)
 np.random.seed(42)
 random.seed(42)
 
-train_df = pd.read_csv("C:/Users/administer/PycharmProjects/torch/HB_ILI_2010-2022N.csv")  # 导入文件
-print(f"len(train_df):{len(train_df)}")  # 打印出train_df的长度
-train_df.head()  # 展示前几行
+# 导入Excel文件
+file_path = "C:\\Users\\administer\\Desktop\\revision\\ILI%.xlsx"
+train_data = pd.read_excel(file_path, sheet_name='Sheet1')
+test_data = pd.read_excel(file_path, sheet_name='Sheet2')
 
-ILI = train_df['spline_ILIp'].values
-print(f"len(ILI):{len(ILI)}")
-# plt.plot([i for i in range(len(ILI))], ILI)
-# plt.show()
-
-# 创建MinMaxScaler对象
-scaler = MinMaxScaler()
-ILI = scaler.fit_transform(ILI.reshape(-1, 1))
+# 数据标准化
+scaler = MinMaxScaler(feature_range=(0, 1))
+train_scaled = scaler.fit_transform(train_data)
+test_scaled = scaler.transform(test_data)
 
 
-def split_data(data, time_step):
-    dataX = []
-    datay = []
-    for i in range(len(data)-time_step):   # 取值从（数据长度-时间步长）
-        dataX.append(data[i:i+time_step])  # 增加维度 i 到 i+t，为一个窗口，t=12，取0-11（12个）
-        datay.append(data[i+time_step])  # 增加维度 i+t 为预测结果，取12（第13个）
-    dataX = np.array(dataX).reshape(len(dataX), time_step, -1)
-    datay = np.array(datay)
-    return dataX, datay
+# 创建LSTM输入和输出张量
+def create_sequences(data, time_step=52):
+    X, y = [], []
+    for i in range(len(data) - time_step):
+        X.append(data[i:(i + time_step), 0])
+        y.append(data[i + time_step, 0])
+    return np.array(X), np.array(y)
+
+time_step = 52
+X_train, y_train = create_sequences(train_scaled, time_step)
+X_test, y_test = create_sequences(test_scaled, time_step)
+
+# 转换为PyTorch张量
+X_train = torch.FloatTensor(X_train).unsqueeze(2)
+y_train = torch.FloatTensor(y_train).unsqueeze(1)
+X_test = torch.FloatTensor(X_test).unsqueeze(2)
+y_test = torch.FloatTensor(y_test).unsqueeze(1)
+
+# 创建数据加载器
+train_dataset = TensorDataset(X_train, y_train)
+train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
 
 
-dataX, datay = split_data(ILI, time_step=52)
-print(f"dataX.shape:{dataX.shape},datay.shape:{datay.shape}")
-
-
-# 划分训练集和测试集的函数
-def train_test_split(dataX, datay, shuffle=True, percentage=0.8):
-    """
-    将训练数据X和标签y以numpy.array数组的形式传入
-    划分的比例定为训练集:测试集=8:2
-    """
-    if shuffle:
-        random_num = [index for index in range(len(dataX))]
-        np.random.shuffle(random_num)
-        dataX = dataX[random_num]
-        datay = datay[random_num]
-    split_num = int(len(dataX)*percentage)
-    train_X = dataX[:split_num]
-    train_y = datay[:split_num]
-    test_X = dataX[split_num:]
-    test_y = datay[split_num:]
-    return train_X, train_y, test_X, test_y
-
-
-train_X, train_y, test_X, test_y = train_test_split(dataX, datay, shuffle=False, percentage=0.8)
-print(f"train_X.shape:{train_X.shape},test_X.shape:{test_X.shape}")
-X_train, y_train = train_X, train_y  # 名称转换
-
-
-# 定义CNN+LSTM模型类
-class CNN_LSTM(nn.Module):
-    def __init__(self, conv_input, input_size, hidden_size, num_layers, output_size, dropout=0.5):
-        super(CNN_LSTM, self).__init__()
-        self.hidden_size = hidden_size   # LSTM隐藏层单元数
-        self.num_layers = num_layers  # LSTM层数
-        self.conv = nn.Conv1d(conv_input, conv_input, 1)   # 卷积层输入特征维度
-        self.lstm = nn.LSTM(input_size, hidden_size, num_layers, batch_first=True)
-        self.dropout = nn.Dropout(dropout)
-        self.fc = nn.Linear(hidden_size, output_size)
+# 定义CNN-LSTM模型
+class CNNLSTM(nn.Module):
+    def __init__(self, cnn_channels, lstm_hidden_size, num_layers, dropout_rate):
+        super(CNNLSTM, self).__init__()
+        self.cnn = nn.Conv1d(in_channels=1, out_channels=cnn_channels, kernel_size=3, padding=1)
+        self.lstm = nn.LSTM(input_size=cnn_channels, hidden_size=lstm_hidden_size, num_layers=num_layers,
+                            batch_first=True)
+        self.dropout = nn.Dropout(p=dropout_rate)
+        self.fc = nn.Linear(lstm_hidden_size, 1)
 
     def forward(self, x):
-        x = self.conv(x)
-        h0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size)  # 初始化隐藏状态h0
-        c0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size)  # 初始化记忆状态c0
-        # print(f"x.shape:{x.shape},h0.shape:{h0.shape},c0.shape:{c0.shape}")
-        out, _ = self.lstm(x, (h0, c0))  # LSTM前向传播
-        out = self.fc(out[:, -1, :])  # 取最后一个时间步的输出作为预测结果
-        return out
+        x = x.permute(0, 2, 1)
+        x = self.cnn(x)
+        x = x.permute(0, 2, 1)
+        x, _ = self.lstm(x)
+        x = self.dropout(x[:, -1, :])
+        x = self.fc(x)
+        return x
 
 
-# %%time
-test_X1 = torch.Tensor(test_X)  # 转为torch的张量
-test_y1 = torch.Tensor(test_y)
-
-# 定义输入、隐藏状态和输出维度
-input_size = 1  # 输入特征维度
-conv_input = 52
-hidden_size = 64  # LSTM隐藏状态维度
-num_layers = 2  # LSTM层数
-output_size = 1  # 输出维度（预测目标维度）
-
-# 创建CNN_LSTM模型实例
-model = CNN_LSTM(conv_input, input_size, hidden_size, num_layers, output_size)
-
-# 训练周期为500次
-num_epochs = 500
-batch_size = 256
-# 一次训练的数量
-# 优化器
-optimizer = optim.Adam(model.parameters(), lr=0.001, betas=(0.5, 0.999))
-# 损失函数
-criterion = nn.MSELoss()
-
-train_losses = []
-test_losses = []
-print(f"start")
-
-for epoch in range(num_epochs):
-
-    random_num = [i for i in range(len(train_X))]
-    np.random.shuffle(random_num)
-
-    train_X = train_X[random_num]
-    train_y = train_y[random_num]
-
-    train_X1 = torch.Tensor(train_X[:batch_size])
-    train_y1 = torch.Tensor(train_y[:batch_size])
-
-    # 训练
+# 训练和验证模型
+def train_and_evaluate(train_loader, model, criterion, optimizer, num_epochs=200):
     model.train()
-    # 将梯度清空
-    optimizer.zero_grad()
-    # 将数据放进去训练
-    output = model(train_X1)
-    # 计算每次的损失函数
-    train_loss = criterion(output, train_y1)
-    # 反向传播
-    train_loss.backward()
-    # 优化器进行优化(梯度下降,降低误差)
-    optimizer.step()
-
-    if epoch % 20 == 0:
-        model.eval()
-        with torch.no_grad():
-            output = model(test_X1)
-            test_loss = criterion(output, test_y1)
-        train_losses.append(train_loss.detach())
-        test_losses.append(test_loss.detach())
-        print(f"epoch:{epoch},train_loss:{train_loss},test_loss:{test_loss}")
-
-# 将训练集和测试集的损失数据存储到DataFrame中
-loss_data = pd.DataFrame({
-    'Epochs': range(0, num_epochs, 20),  # 每20个周期为一个间隔
-    'Train Loss': train_losses,
-    'Test Loss': test_losses
-})
-
-# 将DataFrame保存为CSV文件
-loss_data.to_csv('C:/Users/administer/PycharmProjects/torch/result/loss_data.csv', index=False)
+    for epoch in range(num_epochs):
+        for X_batch, y_batch in train_loader:
+            optimizer.zero_grad()
+            outputs = model(X_batch)
+            loss = criterion(outputs, y_batch)
+            loss.backward()
+            optimizer.step()
+    return model
 
 
-# 均方误差计算
-def mse(pred_y, true_y):
-    return np.mean((pred_y-true_y) ** 2)
-
-
-# 计算loss&绘制loss图
-train_losses_np = [loss.item() for loss in train_losses]
-test_losses_np = [loss.item() for loss in test_losses]
-plt.figure(figsize=(10, 5))
-plt.plot(range(0, num_epochs, 20), train_losses_np, label='Train Loss')
-plt.plot(range(0, num_epochs, 20), test_losses_np, label='Test Loss')
-plt.title('Training and Testing Loss over Epochs')
-plt.xlabel('Epochs')
-plt.ylabel('Loss')
-plt.legend()
-# plt.show()
-
-# 逆归一化&组合数据
-train_X1 = torch.Tensor(X_train)
-train_pred = model(train_X1).detach().numpy()
-test_pred = model(test_X1).detach().numpy()
-pred_y = np.concatenate((train_pred, test_pred))
-pred_y = scaler.inverse_transform(pred_y).T[0]
-true_y = np.concatenate((y_train, test_y))
-true_y = scaler.inverse_transform(true_y).T[0]
-
-# 结果写入
-pred_result = pd.DataFrame({
-    'pred_y': pred_y.flatten(),
-    'true_y': true_y.flatten()
-})
-pred_result.to_csv('C:/Users/administer/PycharmProjects/torch/result/CNN-LSTM_pred_result.csv', index=False)
-
-# MSE
-print(f"mse_train(pred_y,true_y):{mse(train_pred, y_train)}")
-print(f"mse_test(pred_y,true_y):{mse(test_pred, test_y)}")
-print(f"mse(pred_y,true_y):{mse(pred_y,true_y)}")
-
-# RMSE
-print(f"mean_squared_error_train:{mean_squared_error(train_pred, y_train, squared=False)}")
-print(f"mean_squared_error_test:{mean_squared_error(test_pred, test_y, squared=False)}")
-print(f"mean_squared_error(pred_y, true_y):{mean_squared_error(pred_y,true_y, squared=False)}")
-
-#MAE
-print(f"mean_absolute_error_train:{mean_absolute_error(train_pred, y_train)}")
-print(f"mean_absolute_error_test:{mean_absolute_error(test_pred, test_y)}")
-print(f"mean_absolute(pred_y, true_y):{mean_absolute_error(pred_y,true_y)}")
-
-# R²
-print(f"r2_score_train:{r2_score(train_pred, y_train)}")
-print(f"r2_score_test:{r2_score(test_pred, test_y)}")
-print(f"r2_score(pred_y, true_y):{r2_score(pred_y,true_y)}")
-
-# 将指标存储为字典
-metrics_dict = {
-    "Metric": ["MAE", "MSE", "RMSE", "R^2"],
-    "Train": [mean_absolute_error(train_pred, y_train),
-              mse(train_pred, y_train),
-              mean_squared_error(train_pred, y_train, squared=False),
-              r2_score(train_pred, y_train)],
-    "Test": [mean_absolute_error(test_pred, test_y),
-             mse(test_pred, test_y),
-             mean_squared_error(test_pred, test_y, squared=False),
-             r2_score(test_pred, test_y)]
+# 超参数选择
+dropout_rate = 0.2
+param_grid = {
+    'num_layers': [1, 2, 3],
+    'hidden_size': [16, 32, 64],
+    'batch_size': [32, 64, 128],
+    'learn_rates': [0.001, 0.01]
 }
 
-# 写入CSV文件
-with open('C:/Users/administer/PycharmProjects/torch/result/CNN-LSTM_metrics.csv', 'w', newline='') as csvfile:
-    fieldnames = ['Metric', 'Train', 'Test']
-    writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+best_loss = float('inf')
 
-    writer.writeheader()
-    for i in range(len(metrics_dict["Metric"])):
-        writer.writerow({'Metric': metrics_dict["Metric"][i],
-                         'Train': metrics_dict["Train"][i],
-                         'Test': metrics_dict["Test"][i]})
+print(f"start")
+kf = KFold(n_splits=5, shuffle=True)
+results = []
 
-# 绘制预测图
-plt.figure(figsize=(10, 5))
-plt.title("CNN-LSTM for ILI% Prediction")
-x = [i for i in range(len(true_y))]
-plt.plot(x, pred_y, marker="+", markersize=1.5, color="orange", label="pred_y")
-plt.plot(x, true_y, marker="o", markersize=1.5,  color="purple", label="true_y")
-plt.xlabel('Weeks')
-plt.grid(False)
-plt.ylabel('ILI% Predicted Value')
+for num_layers in param_grid['num_layers']:
+    for hidden_size in param_grid['hidden_size']:
+        for batch_size in param_grid['batch_size']:
+            for learn_rates in param_grid['learn_rates']:
+                fold_losses = []
+                for fold, (train_index, val_index) in enumerate(kf.split(X_train)):
+
+                    X_train_fold = X_train[train_index]
+                    y_train_fold = y_train[train_index]
+
+                    X_val_fold = X_train[val_index]
+                    y_val_fold = y_train[val_index]
+
+                    train_dataset_fold = TensorDataset(X_train_fold, y_train_fold)
+                    train_loader_fold = DataLoader(train_dataset_fold, batch_size=batch_size, shuffle=True)
+
+                    val_dataset_fold = TensorDataset(X_val_fold, y_val_fold)
+                    val_loader_fold = DataLoader(val_dataset_fold, batch_size=batch_size, shuffle=True)
+
+
+                    model = CNNLSTM(cnn_channels=16, lstm_hidden_size=hidden_size, num_layers=num_layers,
+                                    dropout_rate=dropout_rate)
+                    criterion = nn.MSELoss()
+                    optimizer = torch.optim.Adam(model.parameters(), lr=learn_rates)
+
+                    model = train_and_evaluate(train_loader_fold, model, criterion, optimizer)
+
+                    model.eval()
+                    with torch.no_grad():
+                        val_losses = []
+                        for x_val, y_val in val_loader_fold:
+                            val_outputs = model(x_val)
+                            val_loss = criterion(val_outputs, y_val)
+                            val_losses.append(val_loss.item())
+                        average_val_loss = np.mean(val_losses)
+                        fold_losses.append(average_val_loss)
+                print(f'Fold {fold + 1}, Loss: {average_val_loss:.4f}')
+
+                average_fold_performance = np.mean(fold_losses)
+                results.append((num_layers, hidden_size, batch_size, learn_rates, average_fold_performance))
+                print(
+                    f'Params - Layers: {num_layers}, Hidden: {hidden_size}, Batch: {batch_size}, LR: {learn_rates}, Avg Loss: {average_fold_performance:.4f}')
+
+# 找到最佳参数组合
+best_params = min(results, key=lambda x: x[4])
+print(
+    f'Best Params - Layers: {best_params[0]}, Hidden: {best_params[1]}, Batch Size: {best_params[2]}, Learning Rate: {best_params[3]}, Loss: {best_params[4]:.4f}')
+
+# 实例化模型
+cnn_channels = 64
+num_layers = best_params[0]
+lstm_hidden_size = best_params[1]
+batch_size = best_params[2]
+lr = best_params[3]
+dropout_rate = 0.2
+
+
+model = CNNLSTM(cnn_channels=cnn_channels, lstm_hidden_size=lstm_hidden_size,
+                num_layers=num_layers, dropout_rate=dropout_rate)
+
+# 定义优化器和损失函数
+optimizer = optim.Adam(model.parameters(), lr=0.01)
+criterion = nn.MSELoss()
+
+# 将模型切换到训练模式
+model.train()
+
+# 设置训练参数
+epochs = 200
+
+# 训练模型
+for epoch in range(epochs):
+    running_loss = 0.0
+    for inputs, targets in train_loader:
+        # 梯度置零
+        optimizer.zero_grad()
+
+        # 前向传播
+        outputs = model(inputs)
+
+        # 计算损失
+        loss = criterion(outputs, targets)
+
+        loss.backward()
+        optimizer.step()
+        running_loss += loss.item() * inputs.size(0)
+
+    # 打印每个epoch的训练损失
+    epoch_loss = running_loss / len(train_loader.dataset)
+    print(f'Epoch [{epoch + 1}/{epochs}], Loss: {epoch_loss:.4f}')
+
+torch.save(model.state_dict(), 'best_CNN-LSTM_model.pth')
+
+print('Finished Training')
+
+# 设置模型为评估模式
+model.eval()
+
+# 预测
+with torch.no_grad():
+    y_pred = model(X_test)
+
+total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+print(f"Total trainable parameters: {total_params}")
+
+
+def inverse_transform(scaler, data):
+    return scaler.inverse_transform(data)
+
+
+# 计算指标
+y_pred = y_pred.numpy()
+y_test = y_test.numpy()
+
+y_pred = scaler.inverse_transform(y_pred)
+y_test = scaler.inverse_transform(y_test)
+
+mae = mean_absolute_error(y_test, y_pred)
+mse = mean_squared_error(y_test, y_pred)
+print(f'MAE: {mae:.4f}, MSE: {mse:.4f}')
+
+# 绘制折线图
+plt.figure(figsize=(12, 6))
+plt.plot(y_test, label='Actual')
+plt.plot(y_pred, label='Predicted')
+plt.title('Actual vs Predicted')
+plt.xlabel('Time')
+plt.ylabel('Value')
 plt.legend()
 plt.show()
 
-
+# 转换为 DataFrame
+df = pd.DataFrame({'Actual': y_test.flatten(), 'Predicted': y_pred.flatten()})
+file_name = 'CNN-LSTM_result.xlsx'
+df.to_excel(file_name, index=False)
+print(f"Predictions and actuals saved to {file_name}")
